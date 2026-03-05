@@ -187,8 +187,7 @@ jolux:inForceStatus:
 
 ## Entwickelt von
 
-Hayal Isik | Schulamt der Stadt Zürich | Mitglied KI-Fachgruppe Stadtverwaltung Zürich  
-GitHub: [@malkreide](https://github.com/malkreide)
+Hayal Hayal | GitHub: [@malkreide](https://github.com/malkreide)
 
 ---
 
