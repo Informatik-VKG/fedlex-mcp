@@ -26,8 +26,7 @@ Transport: Dual — stdio (lokal) und SSE (Cloud/Render.com)
 import json
 import sys
 from datetime import date, timedelta
-from enum import Enum
-from typing import Optional
+from enum import StrEnum
 
 import httpx
 from mcp.server.fastmcp import FastMCP
@@ -76,7 +75,7 @@ mcp = FastMCP(
 # ---------------------------------------------------------------------------
 
 
-class Language(str, Enum):
+class Language(StrEnum):
     """Offizielle Landessprachen der Schweizerischen Eidgenossenschaft."""
 
     DE = "de"
@@ -192,8 +191,8 @@ class SearchGazetteInput(BaseModel):
         min_length=2, max_length=200,
     )
     language: Language = Field(default=Language.DE)
-    year: Optional[int] = Field(default=None, ge=1999, le=2030,
-                                description="Optional: Nur dieses Publikationsjahr (z.B. 2024)")
+    year: int | None = Field(default=None, ge=1999, le=2030,
+                              description="Optional: Nur dieses Publikationsjahr (z.B. 2024)")
     limit: int = Field(default=MAX_RESULTS_DEFAULT, ge=1, le=MAX_RESULTS_LIMIT)
 
 
@@ -209,7 +208,7 @@ class GetLawHistoryInput(BaseModel):
 
 class SearchTreatiesInput(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
-    keywords: Optional[str] = Field(
+    keywords: str | None = Field(
         default=None,
         description="Suchbegriff im Titel, z.B. 'Bildung', 'EU', 'Datenschutz'. Ohne Begriff: neueste Verträge.",
         max_length=200,
@@ -341,14 +340,14 @@ def _format_law_detail(
         s_sr = val(successor, "srNumber", "–")
         s_entry = val(successor, "entryDate", "–")
         s_url = fedlex_url(s_uri, lang)
-        out += f"\n---\n### ⚠️ Nachfolge-Erlass (in Kraft)\n\n"
+        out += "\n---\n### ⚠️ Nachfolge-Erlass (in Kraft)\n\n"
         out += "| Feld | Wert |\n|---|---|\n"
         out += f"| **Vollständiger Titel** | {s_title} |\n"
         out += f"| **Abkürzung** | {s_short} |\n"
         if s_sr != "–":
             out += f"| **SR-Nummer** | {s_sr} |\n"
         out += f"| **Inkrafttreten** | {s_entry} |\n"
-        out += f"| **Status** | ✅ In Kraft |\n"
+        out += "| **Status** | ✅ In Kraft |\n"
         out += f"\n**Direktlink:** [{s_url}]({s_url})\n"
 
     out += FEDLEX_SOURCE
