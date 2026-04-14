@@ -127,6 +127,12 @@ For use via **claude.ai in the browser** (e.g. on managed workstations without l
 
 ---
 
+## Demo
+
+![Demo: Claude using fedlex_search_laws](docs/assets/demo.svg)
+
+---
+
 ## Available Tools
 
 | Tool | Description |
@@ -238,12 +244,14 @@ pytest tests/ -m "live"
 
 ---
 
-## Security
+## Safety & Limits
 
-- This server is **read-only** — no write operations
-- All queries go directly to the public Fedlex endpoint
-- No API keys or authentication required
-- Data sovereignty: no data is transmitted to third parties
+- **Read-only:** All tools perform SPARQL SELECT queries only — no data is written, modified, or deleted on the Fedlex endpoint.
+- **No personal data:** Fedlex contains public law texts and official gazettes. No personally identifiable information (PII) is processed or stored by this server.
+- **Rate limits:** The Fedlex SPARQL endpoint is a public service without a documented rate limit; use `limit` parameters conservatively. The server enforces a 45s timeout per request.
+- **Data freshness:** Results reflect the Fedlex endpoint at query time. No caching is performed by this server.
+- **Terms of service:** Data is subject to the reuse conditions of [fedlex.admin.ch](https://www.fedlex.admin.ch/de/broadcasters) — free reuse for commercial and other purposes.
+- **No guarantees:** This server is a community project, not affiliated with the Swiss Federal Chancellery. Availability depends on the upstream SPARQL endpoint.
 
 ---
 
