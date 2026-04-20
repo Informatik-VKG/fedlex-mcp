@@ -879,6 +879,6 @@ if __name__ == "__main__":
         for i, arg in enumerate(sys.argv):
             if arg == "--port" and i + 1 < len(sys.argv):
                 port = int(sys.argv[i + 1])
-        mcp.run(transport="streamable-http", port=port)
+        mcp.run(transport="streamable-http")
     else:
         mcp.run()
