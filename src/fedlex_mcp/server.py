@@ -25,6 +25,7 @@ Transport: Dual — stdio (lokal) und SSE (Cloud/Render.com)
 import os
 import sys
 import json
+import uvicorn
 from datetime import date, timedelta
 from enum import StrEnum
 
