@@ -25,7 +25,6 @@ Transport: Dual — stdio (lokal) und SSE (Cloud/Render.com)
 import os
 import sys
 import json
-import sys
 from datetime import date, timedelta
 from enum import StrEnum
 
@@ -873,16 +872,30 @@ async def get_server_info() -> str:
 # ---------------------------------------------------------------------------
 # Entry point — Dual Transport
 # ---------------------------------------------------------------------------
-import os
-import sys
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
+import uvicorn
+from starlette.applications import Starlette
+from starlette.routing import Mount
+from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+
+def create_app():
+    session_manager = StreamableHTTPSessionManager(app=mcp)
+
+    @asynccontextmanager
+    async def lifespan(app: Starlette) -> AsyncIterator[None]:
+        async with session_manager.run():
+            yield
+
+    return Starlette(
+        routes=[Mount("/mcp", app=session_manager.handle_request)],
+        lifespan=lifespan,
+    )
 
 if __name__ == "__main__":
     if "--http" in sys.argv:
-        port = int(os.environ.get("PORT", "8000"))
-        for i, arg in enumerate(sys.argv):
-            if arg == "--port" and i + 1 < len(sys.argv):
-                port = int(sys.argv[i + 1])
-
-        mcp.run(transport="http", host="0.0.0.0", port=port)
+        port = int(os.environ.get("PORT", "10000"))
+        uvicorn.run(create_app(), host="0.0.0.0", port=port)
     else:
         mcp.run()
