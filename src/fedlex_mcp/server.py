@@ -874,25 +874,9 @@ async def get_server_info() -> str:
 # ---------------------------------------------------------------------------
 # Entry point — Dual Transport
 # ---------------------------------------------------------------------------
-import uvicorn
-from starlette.applications import Starlette
-from starlette.responses import PlainTextResponse
-from starlette.routing import Mount, Route
-
-async def root(request):
-    return PlainTextResponse("Fedlex MCP Server läuft")
-
-def create_app():
-    return Starlette(
-        routes=[
-            Route("/", root),
-            Mount("/", app=mcp.streamable_http_app()),
-        ]
-    )
-
 if __name__ == "__main__":
     if "--http" in sys.argv:
         port = int(os.environ.get("PORT", "10000"))
-        uvicorn.run(create_app(), host="0.0.0.0", port=port)
+        uvicorn.run(mcp.streamable_http_app(), host="0.0.0.0", port=port)
     else:
         mcp.run()
