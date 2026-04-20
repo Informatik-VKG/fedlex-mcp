@@ -68,6 +68,8 @@ mcp = FastMCP(
         "Amtliche Sammlung (AS), Bundesblatt (BBl) und Staatsverträge. "
         "Alle Daten stammen vom SPARQL-Endpoint der Schweizerischen Bundeskanzlei."
     ),
+    stateless_http=True,
+    json_response=True,
 )
 
 # ---------------------------------------------------------------------------
@@ -872,25 +874,20 @@ async def get_server_info() -> str:
 # ---------------------------------------------------------------------------
 # Entry point — Dual Transport
 # ---------------------------------------------------------------------------
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
-
 import uvicorn
 from starlette.applications import Starlette
-from starlette.routing import Mount
-from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+from starlette.responses import PlainTextResponse
+from starlette.routing import Mount, Route
+
+async def root(request):
+    return PlainTextResponse("Fedlex MCP Server läuft")
 
 def create_app():
-    session_manager = StreamableHTTPSessionManager(app=mcp)
-
-    @asynccontextmanager
-    async def lifespan(app: Starlette) -> AsyncIterator[None]:
-        async with session_manager.run():
-            yield
-
     return Starlette(
-        routes=[Mount("/mcp", app=session_manager.handle_request)],
-        lifespan=lifespan,
+        routes=[
+            Route("/", root),
+            Mount("/", app=mcp.streamable_http_app()),
+        ]
     )
 
 if __name__ == "__main__":
