@@ -22,7 +22,8 @@ JOLux-Datenmodell (verifiziert):
 
 Transport: Dual — stdio (lokal) und SSE (Cloud/Render.com)
 """
-
+import os
+import sys
 import json
 import sys
 from datetime import date, timedelta
