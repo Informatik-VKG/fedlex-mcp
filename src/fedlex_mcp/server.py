@@ -873,6 +873,9 @@ async def get_server_info() -> str:
 # Entry point — Dual Transport
 # ---------------------------------------------------------------------------
 
+import os
+import sys
+
 if __name__ == "__main__":
     if "--http" in sys.argv:
         port = int(os.environ.get("PORT", "8000"))
