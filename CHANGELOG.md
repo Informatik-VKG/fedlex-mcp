@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (Sprint 2 audit remediation)
+- **Structured logging** with `structlog` — JSON to stderr, per-call bound
+  context (`OBS-003`, keeps stdout clean for stdio per `OBS-004`).
+- **MCP `Context` injection** in all tools (`ctx.info`/`ctx.error`) for
+  client-visible progress and error reporting (`SDK-003`).
+- **Use-case tags** (`<use_case>`/`<important_notes>`/`<example>`) in every tool
+  description to improve LLM tool selection (`ARCH-002`).
+- Empty results now carry a `match_type: none` marker (`ARCH-003`).
+- `.gitignore` and a gitleaks secret-scan CI workflow (`ARCH-005`).
+- `.github/dependabot.yml` (monthly pip + actions updates) and a README
+  "MCP Protocol Version" section (`ARCH-012`).
+- README "Project Phase" section declaring Phase 1 / read-only (`OPS-003`).
+- Multi-stage, non-root `Dockerfile` + `.dockerignore` (`SCALE-004`).
+
 ### Changed
 - **Shared HTTP client via FastMCP lifespan** — a single `httpx.AsyncClient` is now
   created once per server lifecycle instead of per tool call (audit `SDK-001`).

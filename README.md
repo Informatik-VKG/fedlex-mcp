@@ -234,6 +234,34 @@ fedlex-mcp/
 
 ---
 
+## Project Phase
+
+This server is in **Phase 1 (read-only)**. All tools are annotated
+`readOnlyHint: true` / `destructiveHint: false` and only ever query the public
+Fedlex SPARQL endpoint — there are no write, send, or filesystem capabilities.
+
+| Phase | Scope | Status |
+|---|---|---|
+| **1 — Read-only** | Query SR/AS/BBl/treaties | ✅ current |
+| 2 — Write-capable | (none planned) | — |
+| 3 — Multi-agent | (none planned) | — |
+
+A transition to a later phase would require an audit re-run and the
+human-in-the-loop controls described in the audit catalog before any
+write-capable tool is added.
+
+---
+
+## MCP Protocol Version
+
+The protocol version is negotiated at the `initialize` handshake by the
+[`mcp`](https://pypi.org/project/mcp/) Python SDK (pinned to `>=1.3.0` in
+`pyproject.toml`). The SDK is kept current via monthly Dependabot PRs
+(`.github/dependabot.yml`); protocol-relevant bumps are noted in
+[`CHANGELOG.md`](CHANGELOG.md).
+
+---
+
 ## Testing
 
 ```bash
