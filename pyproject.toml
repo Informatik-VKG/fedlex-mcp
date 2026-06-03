@@ -41,6 +41,13 @@ dev = [
     "respx>=0.21.0",
     "ruff>=0.4.0",
 ]
+# Optional OpenTelemetry tracing (OBS-006). Enabled at runtime only when
+# OTEL_EXPORTER_OTLP_ENDPOINT is set; otherwise a complete no-op.
+otel = [
+    "opentelemetry-sdk>=1.25.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.25.0",
+    "opentelemetry-instrumentation-httpx>=0.46b0",
+]
 
 [project.scripts]
 fedlex-mcp = "fedlex_mcp.server:mcp.run"
