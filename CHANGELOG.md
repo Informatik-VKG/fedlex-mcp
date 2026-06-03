@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-06-03
+
+First production-ready release. Consolidates the `mcp-audit-skill` remediation
+(Sprints 1–4); the post-remediation re-audit reports **production-ready**.
+
+### Audit verification
+- **Production-ready:** ✅ yes
+- **Audit run-id:** `2026-06-03T100302-Z-fedlex-mcp`
+- **Skill version:** `1.0.0` · **Catalog hash:** `091f446b2796…`
+- **Check results:** 41 pass · 0 fail · 2 partial (non-blocking) · 1 n/a
+
 ### Added (Sprint 4 — infra & auth-posture remediation)
 - **Hardened Kubernetes manifest** (`deploy/kubernetes.yaml`): non-root
   `securityContext`, read-only rootfs, dropped capabilities, seccomp
