@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (Sprint 4 — infra & auth-posture remediation)
+- **Hardened Kubernetes manifest** (`deploy/kubernetes.yaml`): non-root
+  `securityContext`, read-only rootfs, dropped capabilities, seccomp
+  RuntimeDefault (`SEC-007`); CPU/memory requests+limits (`SCALE-006`);
+  `Mcp-Session-Id`-aware nginx Ingress routing + cookie affinity
+  (`SCALE-002`/`SCALE-003`).
+- **HAProxy edge config** (`deploy/haproxy.cfg`): `Mcp-Session-Id` stick-table
+  (100k entries, 24h TTL, health-checked failover) for non-k8s multi-instance
+  deployments (`SCALE-002`/`SCALE-003`).
+- **Server-side tool allow-list** via `FEDLEX_ENABLED_TOOLS` (default-deny);
+  complements an upstream gateway (`SEC-014`).
+- **`docs/deployment.md`** (single-instance vs. horizontally-scaled guidance)
+  and **ADR 0002** documenting auth/gateway posture: SEC-009 (N/A without auth,
+  with re-audit trigger) and SEC-015 (gateway concern; SEC-022 as compensating
+  control).
+
 ### Added (Sprint 3 audit remediation)
 - **Structured response envelope** `FedlexResponse` for all 7 tools — `source`,
   `license`, `match_type`, `count`, `results[]` (each with `uri`/`url`

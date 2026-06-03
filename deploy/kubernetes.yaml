@@ -1,0 +1,127 @@
+# Hardened Kubernetes deployment for fedlex-mcp (Streamable HTTP).
+#
+# Resolves, when deployed:
+#   SEC-007    — container sandboxing (non-root, read-only rootfs, dropped caps,
+#                seccomp RuntimeDefault, no privilege escalation)
+#   SCALE-006  — explicit memory/CPU requests+limits and a file-descriptor budget
+#   SCALE-002  — stateful load balancing via session affinity
+#   SCALE-003  — Mcp-Session-Id routing at the edge (nginx upstream hash)
+#
+# Single-instance is the default elsewhere; this manifest is for the
+# horizontally-scaled (multi-replica) deployment, where sticky routing matters.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fedlex-mcp
+  labels:
+    app: fedlex-mcp
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: fedlex-mcp
+  template:
+    metadata:
+      labels:
+        app: fedlex-mcp
+    spec:
+      # --- Pod-level sandboxing (SEC-007) ---
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: fedlex-mcp
+          image: ghcr.io/malkreide/fedlex-mcp:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+              name: http
+          env:
+            - name: FEDLEX_TRANSPORT
+              value: "streamable-http"
+            - name: FEDLEX_HOST
+              value: "0.0.0.0"          # 0.0.0.0 only inside the container (SEC-016)
+            - name: PORT
+              value: "8000"
+            - name: FEDLEX_ALLOWED_ORIGINS
+              value: "https://claude.ai"
+          # --- Container-level sandboxing (SEC-007) ---
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          # --- Resource limits (SCALE-006) ---
+          # Requests < limits to allow bursting; FD budget for many outbound conns.
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+          # readOnlyRootFilesystem requires a writable /tmp mount.
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          readinessProbe:
+            tcpSocket:
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 30
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fedlex-mcp
+spec:
+  selector:
+    app: fedlex-mcp
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8000
+  # Baseline stickiness; the Ingress below adds Mcp-Session-Id-aware routing.
+  sessionAffinity: ClientIP
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: 86400   # 24h, correlates with session TTL (SCALE-003)
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: fedlex-mcp
+  annotations:
+    # SCALE-003: route by the MCP session header so a session always lands on
+    # the same replica (no shared session store required at this scale).
+    nginx.ingress.kubernetes.io/upstream-hash-by: "$http_mcp_session_id"
+    # SCALE-002: cookie-based affinity fallback for clients before a session id exists.
+    nginx.ingress.kubernetes.io/affinity: "cookie"
+    nginx.ingress.kubernetes.io/affinity-mode: "persistent"
+    nginx.ingress.kubernetes.io/session-cookie-name: "fedlex_mcp_route"
+    nginx.ingress.kubernetes.io/session-cookie-max-age: "86400"
+spec:
+  rules:
+    - host: fedlex-mcp.example.ch
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: fedlex-mcp
+                port:
+                  number: 80

@@ -1201,6 +1201,36 @@ async def compute_tool_signature_hash() -> str:
 
 
 # ---------------------------------------------------------------------------
+# Tool-Allow-List (SEC-014) — Server-Side Defense-in-Depth, default-deny
+# ---------------------------------------------------------------------------
+
+
+def _apply_tool_allowlist() -> None:
+    """Schränkt die exponierten Tools auf eine Allow-List ein (SEC-014).
+
+    Standard ist «alle Tools». Wird `FEDLEX_ENABLED_TOOLS` (kommagetrennt)
+    gesetzt, werden ausschliesslich die gelisteten Tools registriert
+    (default-deny): nicht gelistete Tools verschwinden aus `tools/list` und
+    sind nicht aufrufbar. Ergänzt — ersetzt nicht — ein vorgelagertes Gateway.
+    """
+    raw = os.environ.get("FEDLEX_ENABLED_TOOLS", "").strip()
+    if not raw:
+        return
+    enabled = {name.strip() for name in raw.split(",") if name.strip()}
+    try:
+        registry = mcp._tool_manager._tools
+        removed = [name for name in list(registry) if name not in enabled]
+        for name in removed:
+            registry.pop(name, None)
+        log.info("tool_allowlist_applied", enabled=sorted(enabled), removed=sorted(removed))
+    except Exception:  # pragma: no cover - interne FastMCP-API nicht verfügbar
+        log.warning("tool_allowlist_unsupported")
+
+
+_apply_tool_allowlist()
+
+
+# ---------------------------------------------------------------------------
 # Entry point — Dual Transport (Settings-/Env-gesteuert, ARCH-004 / SCALE-001)
 # ---------------------------------------------------------------------------
 
