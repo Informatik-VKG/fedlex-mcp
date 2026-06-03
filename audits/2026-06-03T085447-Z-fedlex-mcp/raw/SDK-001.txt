@@ -1,0 +1,2 @@
+=== SDK-001 lifespan + per-call client ===
+89:    async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:

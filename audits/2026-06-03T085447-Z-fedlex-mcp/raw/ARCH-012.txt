@@ -1,0 +1,2 @@
+=== ARCH-012 protocolVersion/dependabot ===
+no protocolVersion pin
