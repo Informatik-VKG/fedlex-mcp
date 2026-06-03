@@ -12,7 +12,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 import httpx
@@ -312,6 +315,36 @@ def test_tool_definitions_match_lock() -> None:
         "Tool definitions drifted from tool-definitions.lock.json. "
         "Run: PYTHONPATH=src python scripts/snapshot_tools.py"
     )
+
+
+# ---------------------------------------------------------------------------
+# Tool allow-list (SEC-014) — default-deny via FEDLEX_ENABLED_TOOLS
+# ---------------------------------------------------------------------------
+
+def test_tool_allowlist_default_exposes_all() -> None:
+    names = {t.name for t in asyncio.run(server.mcp.list_tools())}
+    assert len(names) == 7
+
+
+def test_tool_allowlist_env_default_deny() -> None:
+    """With FEDLEX_ENABLED_TOOLS set, only listed tools are registered.
+
+    Runs in a subprocess so the module-load-time allow-list does not leak into
+    the rest of the suite.
+    """
+    code = (
+        "import asyncio;from fedlex_mcp import server as s;"
+        "print(sorted(t.name for t in asyncio.run(s.mcp.list_tools())))"
+    )
+    env = {
+        **os.environ,
+        "FEDLEX_ENABLED_TOOLS": "fedlex_search_laws,fedlex_get_law_by_sr",
+        "PYTHONPATH": "src",
+    }
+    out = subprocess.check_output([sys.executable, "-c", code], env=env, text=True)
+    assert "fedlex_search_laws" in out
+    assert "fedlex_get_law_by_sr" in out
+    assert "fedlex_search_treaties" not in out
 
 
 # ---------------------------------------------------------------------------
