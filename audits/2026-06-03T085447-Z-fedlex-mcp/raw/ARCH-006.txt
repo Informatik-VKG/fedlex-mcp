@@ -1,0 +1,2 @@
+=== ARCH-006 tool count ===
+7

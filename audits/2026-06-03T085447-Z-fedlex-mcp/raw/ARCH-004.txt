@@ -1,0 +1,6 @@
+=== ARCH-004/SCALE-001/SEC-006/SEC-016 transport+host ===
+877:    if "--http" in sys.argv:
+879:        for i, arg in enumerate(sys.argv):
+880:            if arg == "--port" and i + 1 < len(sys.argv):
+881:                port = int(sys.argv[i + 1])
+882:        mcp.run(transport="streamable-http", port=port)

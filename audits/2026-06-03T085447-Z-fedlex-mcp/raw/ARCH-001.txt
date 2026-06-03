@@ -1,0 +1,8 @@
+=== ARCH-001 tool names ===
+name="fedlex_search_laws"
+name="fedlex_get_law_by_sr"
+name="fedlex_get_recent_publications"
+name="fedlex_get_upcoming_changes"
+name="fedlex_search_gazette"
+name="fedlex_get_law_history"
+name="fedlex_search_treaties"

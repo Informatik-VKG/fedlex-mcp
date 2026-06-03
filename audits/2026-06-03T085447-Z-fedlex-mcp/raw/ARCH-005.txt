@@ -1,0 +1,3 @@
+=== ARCH-005 secrets/gitignore ===
+no hardcoded secrets
+.gitignore: no .env entry

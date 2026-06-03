@@ -1,0 +1,19 @@
+name: fedlex-mcp
+repo: https://github.com/malkreide/fedlex-mcp
+transport: dual                       # stdio (lokal) + streamable-http (Render) -> dual
+auth_model: none                      # kein API-Key, kein OAuth (No Auth Required Badge)
+data_class: Public Open Data          # Fedlex, freie Wiederverwendung
+write_capable: false                  # alle 7 Tools readOnlyHint=True, destructiveHint=False
+deployment: [local-stdio, Render]     # Docstring: "stdio (lokal) und SSE (Cloud/Render.com)"
+is_cloud_deployed: true               # derived: deployment enthaelt Render
+uses_sampling: false                  # kein ctx.sample im Code
+uses_sequential_thinking: false       # kein sequential-thinking
+tools_include_filesystem: false       # keine Filesystem-Tools, nur SPARQL/HTTP
+tools_make_external_requests: true    # httpx GET an fedlex SPARQL endpoint
+stadt_zuerich_context: false
+schulamt_context: false
+volksschule_context: false
+enterprise_context: false
+sdk_language: Python                  # FastMCP / Python
+data_source:
+  is_swiss_open_data: true
