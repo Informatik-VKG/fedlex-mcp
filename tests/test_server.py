@@ -226,7 +226,7 @@ async def test_connect_error_is_masked() -> None:
 
 
 def test_handle_error_generic_does_not_leak_repr() -> None:
-    out = server.handle_error(ValueError("secret-internal-detail"))
+    out = server.handle_error("fedlex_search_laws", ValueError("secret-internal-detail"))
     assert "secret-internal-detail" not in out
     assert out.startswith("Fehler:")
 
@@ -252,6 +252,32 @@ def test_egress_allow_list_is_frozen() -> None:
 
 def test_server_imports() -> None:
     assert hasattr(server, "mcp")
+
+
+def test_structured_logger_available() -> None:
+    """OBS-003: a structlog logger is configured at module level."""
+    assert server.log is not None
+    assert hasattr(server.log, "info")
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_empty_result_marks_match_type_none() -> None:
+    """ARCH-003: empty results carry a machine-readable match_type marker."""
+    respx.get(ENDPOINT).mock(return_value=_sparql_response([]))
+    out = await server.fedlex_search_laws(SearchLawsInput(keywords="zzzznope"))
+    assert "match_type: none" in out
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_tool_accepts_ctx_none() -> None:
+    """SDK-003: tools take an optional ctx and work when it is absent."""
+    respx.get(ENDPOINT).mock(return_value=_sparql_response([
+        _binding(ca="https://fedlex.data.admin.ch/eli/cc/101", title="BV", srNumber="101"),
+    ]))
+    out = await server.fedlex_search_laws(SearchLawsInput(keywords="Verfassung"), ctx=None)
+    assert "101" in out
 
 
 @pytest.mark.parametrize("sr_number", ["101", "210.10", "172.021"])

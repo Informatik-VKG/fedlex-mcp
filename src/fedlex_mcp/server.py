@@ -22,10 +22,12 @@ JOLux-Datenmodell (verifiziert):
 
 Transport: Dual — stdio (lokal) und Streamable HTTP (Cloud/Render.com),
 wählbar über die Umgebungsvariable FEDLEX_TRANSPORT (stdio | streamable-http).
+
+MCP Protocol Version: ausgehandelt vom mcp-SDK (>=1.3.0); siehe README-Sektion
+"MCP Protocol Version".
 """
 
 import json
-import logging
 import os
 import sys
 from collections.abc import AsyncIterator
@@ -35,7 +37,8 @@ from datetime import date, timedelta
 from enum import StrEnum
 
 import httpx
-from mcp.server.fastmcp import FastMCP
+import structlog
+from mcp.server.fastmcp import Context, FastMCP
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -76,14 +79,23 @@ STATUS_LABELS = {
 
 FEDLEX_SOURCE = "\n---\n*Quelle: Fedlex, Schweizerische Bundeskanzlei (fedlex.admin.ch)*"
 
-# Logging geht bewusst auf STDERR — bei stdio-Transport ist STDOUT exklusiv für
-# das JSON-RPC-Protokoll reserviert (OBS-004).
-logging.basicConfig(
-    level=logging.INFO,
-    stream=sys.stderr,
-    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+# ---------------------------------------------------------------------------
+# Strukturiertes Logging (OBS-003)
+# ---------------------------------------------------------------------------
+# JSON-Logs gehen bewusst auf STDERR — bei stdio-Transport ist STDOUT exklusiv
+# für das JSON-RPC-Protokoll reserviert (OBS-004).
+
+structlog.configure(
+    processors=[
+        structlog.contextvars.merge_contextvars,
+        structlog.processors.add_log_level,
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.JSONRenderer(),
+    ],
+    logger_factory=structlog.WriteLoggerFactory(file=sys.stderr),
+    cache_logger_on_first_use=True,
 )
-logger = logging.getLogger("fedlex_mcp")
+log = structlog.get_logger("fedlex_mcp")
 
 # ---------------------------------------------------------------------------
 # Konfiguration (Settings statt globaler Module-Vars — ARCH-004)
@@ -141,12 +153,34 @@ async def lifespan(_server: FastMCP) -> AsyncIterator[AppContext]:
     global _http_client
     async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
         _http_client = client
-        logger.info("fedlex-mcp lifespan gestartet (shared httpx client)")
+        log.info("lifespan_start", shared_http_client=True)
         try:
             yield AppContext(client=client)
         finally:
             _http_client = None
-            logger.info("fedlex-mcp lifespan beendet")
+            log.info("lifespan_stop")
+
+
+async def _trace(ctx: Context | None, tool: str, **fields: object) -> None:
+    """Loggt einen Tool-Aufruf strukturiert (OBS-003) und — falls ein MCP-Context
+    vorhanden ist — auch an den Client zurück (SDK-003)."""
+    log.info("tool_call", tool=tool, **fields)
+    if ctx is not None:
+        try:
+            await ctx.info(f"{tool}: Anfrage an Fedlex SPARQL")
+        except Exception:  # pragma: no cover - Context ohne aktive Session
+            pass
+
+
+async def _fail(ctx: Context | None, tool: str, e: Exception) -> str:
+    """Einheitlicher Fehler-Pfad: maskierte Meldung + ctx.error (SDK-003 / OBS-002)."""
+    msg = handle_error(tool, e)
+    if ctx is not None:
+        try:
+            await ctx.error(msg)
+        except Exception:  # pragma: no cover - Context ohne aktive Session
+            pass
+    return msg
 
 
 def sparql_escape(value: str) -> str:
@@ -208,13 +242,13 @@ def status_label(status_uri: str) -> str:
     return STATUS_LABELS.get(status_uri, f"({status_uri.split('/')[-1]})")
 
 
-def handle_error(e: Exception) -> str:
+def handle_error(tool: str, e: Exception) -> str:
     """Einheitliche, handlungsweisende Fehlermeldungen.
 
     Interne Exception-Details werden ausschliesslich serverseitig geloggt und
     nie an das LLM zurückgegeben (OBS-001 / OBS-002).
     """
-    logger.warning("Fedlex tool error: %s: %s", type(e).__name__, e)
+    log.warning("tool_error", tool=tool, error_type=type(e).__name__, detail=str(e))
     if isinstance(e, httpx.HTTPStatusError):
         code = e.response.status_code
         if code == 400:
@@ -237,6 +271,12 @@ def handle_error(e: Exception) -> str:
 def result_header(count: int, desc: str) -> str:
     """Standardisierter Ergebnisheader."""
     return f"## Fedlex — {desc}\n**Treffer:** {count}\n\n"
+
+
+def no_match_hint(tips: str) -> str:
+    """Maschinenlesbarer Hinweis bei leeren Resultaten (ARCH-003): markiert den
+    match_type explizit, damit das LLM nicht halluziniert, sondern verfeinert."""
+    return f"\n\n_(match_type: none — keine Treffer)_\n\n{tips}"
 
 
 # ---------------------------------------------------------------------------
@@ -337,6 +377,16 @@ class SearchTreatiesInput(BaseModel):
 
 @mcp.tool(
     name="fedlex_search_laws",
+    description=(
+        "Durchsucht die Systematische Rechtssammlung (SR) des Bundes nach Erlasstiteln "
+        "und liefert SR-Nummer, Abkürzung, Status und Link.\n"
+        "<use_case>Juristische/verwaltungsbezogene Recherche: konsolidiertes Bundesrecht "
+        "(Gesetze, Verordnungen, Vereinbarungen) per Stichwort finden.</use_case>\n"
+        "<important_notes>Sucht nur im Titel, nicht im Volltext. Standardmässig nur in "
+        "Kraft stehende Erlasse (in_force_only=true). Für aufgehobene Erlasse "
+        "in_force_only=false setzen. Max. 100 Treffer.</important_notes>\n"
+        "<example>keywords='Datenschutz', language='de'</example>"
+    ),
     annotations={
         "title": "Erlasse der Systematischen Rechtssammlung (SR) suchen",
         "readOnlyHint": True,
@@ -345,26 +395,12 @@ class SearchTreatiesInput(BaseModel):
         "openWorldHint": True,
     },
 )
-async def fedlex_search_laws(params: SearchLawsInput) -> str:
-    """Durchsucht die Systematische Rechtssammlung (SR) des Bundes nach Erlasstiteln.
-
-    Sucht in allen konsolidierten Bundeserlassen (Gesetze, Verordnungen, Vereinbarungen)
-    nach einem Stichwort im Titel. Gibt SR-Nummer, Abkürzung, Status und Link zurück.
-    Mit in_force_only=True (Standard) werden nur gültige Erlasse gezeigt.
-
-    Args:
-        params (SearchLawsInput): Suchparameter:
-            - keywords (str): Suchbegriff im Titel (z.B. 'Volksschule', 'Datenschutz')
-            - language (Language): Sprache ('de', 'fr', 'it', 'rm'). Standard: 'de'
-            - in_force_only (bool): Nur gültige Erlasse. Standard: True
-            - limit (int): Maximale Trefferzahl (1–100). Standard: 20
-
-    Returns:
-        str: Markdown-Liste mit SR-Nummer, Titel, Abkürzung, Status und Link
-    """
+async def fedlex_search_laws(params: SearchLawsInput, ctx: Context | None = None) -> str:
+    """Durchsucht die Systematische Rechtssammlung (SR) des Bundes nach Erlasstiteln."""
     lang = params.language.value
     suffix = LANG_SUFFIX[lang]
     kw = params.keywords.lower()
+    await _trace(ctx, "fedlex_search_laws", lang=lang, in_force_only=params.in_force_only)
 
     in_force_filter = (
         f'\n  ?ca jolux:inForceStatus <{STATUS_IN_FORCE}> .'
@@ -394,10 +430,12 @@ LIMIT {params.limit}
         if not bindings:
             return (
                 f"Keine Erlasse für **'{params.keywords}'** gefunden "
-                f"[{lang.upper()}, nur gültige: {params.in_force_only}].\n\n"
-                "**Tipps:** Allgemeineren Begriff verwenden | "
-                "`in_force_only=false` für aufgehobene Erlasse | "
-                "Auf Deutsch suchen (vollständigste Abdeckung)"
+                f"[{lang.upper()}, nur gültige: {params.in_force_only}]."
+                + no_match_hint(
+                    "**Tipps:** Allgemeineren Begriff verwenden | "
+                    "`in_force_only=false` für aufgehobene Erlasse | "
+                    "Auf Deutsch suchen (vollständigste Abdeckung)"
+                )
             )
 
         out = result_header(len(bindings), f"SR-Suche '{params.keywords}' [{lang.upper()}]")
@@ -419,7 +457,7 @@ LIMIT {params.limit}
         return out
 
     except Exception as e:
-        return handle_error(e)
+        return await _fail(ctx, "fedlex_search_laws", e)
 
 
 def _format_law_detail(
@@ -469,6 +507,15 @@ def _format_law_detail(
 
 @mcp.tool(
     name="fedlex_get_law_by_sr",
+    description=(
+        "Ruft einen Bundeserlass anhand seiner SR-Nummer ab (Detailansicht mit "
+        "Titel, Abkürzung, Status, Inkrafttreten, Link).\n"
+        "<use_case>Wenn die SR-Nummer bekannt ist (z.B. aus fedlex_search_laws) und "
+        "vollständige Metadaten zu einem Erlass gebraucht werden.</use_case>\n"
+        "<important_notes>Bei aufgehobenen Erlassen wird — sofern auffindbar — der "
+        "Nachfolge-Erlass mitgeliefert. SR-Nummer mit Punkt trennen (235.1).</important_notes>\n"
+        "<example>sr_number='235.1'</example>"
+    ),
     annotations={
         "title": "Erlass nach SR-Nummer abrufen",
         "readOnlyHint": True,
@@ -477,23 +524,12 @@ def _format_law_detail(
         "openWorldHint": True,
     },
 )
-async def fedlex_get_law_by_sr(params: GetLawBySrInput) -> str:
-    """Ruft einen Bundeserlass anhand seiner SR-Nummer ab (Detailansicht).
-
-    Gibt vollständige Metadaten zurück: Titel, Abkürzung, Status,
-    Inkrafttretungsdatum und Link zum konsolidierten Text.
-
-    Args:
-        params (GetLawBySrInput):
-            - sr_number (str): SR-Nummer (z.B. '101', '235.1', '412.10')
-            - language (Language): Sprache der Metadaten. Standard: 'de'
-
-    Returns:
-        str: Markdown-Detailblatt mit allen verfügbaren Metadaten
-    """
+async def fedlex_get_law_by_sr(params: GetLawBySrInput, ctx: Context | None = None) -> str:
+    """Ruft einen Bundeserlass anhand seiner SR-Nummer ab (Detailansicht)."""
     lang = params.language.value
     suffix = LANG_SUFFIX[lang]
     sr = params.sr_number.strip()
+    await _trace(ctx, "fedlex_get_law_by_sr", lang=lang, sr_number=sr)
 
     query = f"""
 PREFIX jolux: <http://data.legilux.public.lu/resource/ontology/jolux#>
@@ -516,11 +552,13 @@ LIMIT 10
 
         if not bindings:
             return (
-                f"Kein Erlass mit SR-Nummer **{sr}** gefunden [{lang.upper()}].\n\n"
-                "**Mögliche Ursachen:**\n"
-                "- SR-Nummer falsch (Punkt als Trennzeichen: '235.1', nicht '235,1')\n"
-                "- Erlass in dieser Sprache nicht vorhanden\n"
-                "- Erlass aufgehoben (mit `in_force_only=false` in `fedlex_search_laws` suchen)"
+                f"Kein Erlass mit SR-Nummer **{sr}** gefunden [{lang.upper()}]."
+                + no_match_hint(
+                    "**Mögliche Ursachen:**\n"
+                    "- SR-Nummer falsch (Punkt als Trennzeichen: '235.1', nicht '235,1')\n"
+                    "- Erlass in dieser Sprache nicht vorhanden\n"
+                    "- Erlass aufgehoben (mit `in_force_only=false` in `fedlex_search_laws` suchen)"
+                )
             )
 
         # Bevorzuge den gültigen Erlass (In Kraft) gegenüber aufgehobenen Fassungen,
@@ -559,11 +597,19 @@ SELECT DISTINCT ?ca ?title ?titleShort ?srNumber ?inForceStatus ?entryDate WHERE
         return _format_law_detail(b, sr, lang, suffix, successor)
 
     except Exception as e:
-        return handle_error(e)
+        return await _fail(ctx, "fedlex_get_law_by_sr", e)
 
 
 @mcp.tool(
     name="fedlex_get_recent_publications",
+    description=(
+        "Ruft die neuesten Publikationen der Amtlichen Sammlung (AS) ab.\n"
+        "<use_case>Regelmässiges Monitoring von Rechtsänderungen — was wurde in den "
+        "letzten N Tagen neu publiziert oder geändert?</use_case>\n"
+        "<important_notes>Liefert Erstpublikationen (AS), nicht den konsolidierten "
+        "Stand. Zeitfenster über `days` (1–365).</important_notes>\n"
+        "<example>days=30, language='de'</example>"
+    ),
     annotations={
         "title": "Neueste Bundesrechtspublikationen (AS) abrufen",
         "readOnlyHint": True,
@@ -572,24 +618,14 @@ SELECT DISTINCT ?ca ?title ?titleShort ?srNumber ?inForceStatus ?entryDate WHERE
         "openWorldHint": True,
     },
 )
-async def fedlex_get_recent_publications(params: GetRecentPublicationsInput) -> str:
-    """Ruft die neuesten Publikationen der Amtlichen Sammlung (AS) und des BBl ab.
-
-    Die AS enthält alle neuen und geänderten Bundeserlasse bei erstmaliger
-    Veröffentlichung. Ideal für regelmässiges Monitoring von Rechtsänderungen.
-
-    Args:
-        params (GetRecentPublicationsInput):
-            - days (int): Letzte N Tage (1–365). Standard: 30
-            - language (Language): Sprache. Standard: 'de'
-            - limit (int): Maximale Trefferzahl. Standard: 20
-
-    Returns:
-        str: Markdown-Liste der neuesten Publikationen mit Datum und Link
-    """
+async def fedlex_get_recent_publications(
+    params: GetRecentPublicationsInput, ctx: Context | None = None
+) -> str:
+    """Ruft die neuesten Publikationen der Amtlichen Sammlung (AS) ab."""
     lang = params.language.value
     suffix = LANG_SUFFIX[lang]
     since_date = (date.today() - timedelta(days=params.days)).isoformat()
+    await _trace(ctx, "fedlex_get_recent_publications", lang=lang, days=params.days)
 
     query = f"""
 PREFIX jolux: <http://data.legilux.public.lu/resource/ontology/jolux#>
@@ -610,8 +646,8 @@ LIMIT {params.limit}
 
         if not bindings:
             return (
-                f"Keine Publikationen in den letzten {params.days} Tagen gefunden "
-                f"[{lang.upper()}].\n\n**Tipp:** `days` erhöhen, z.B. `days=90`."
+                f"Keine Publikationen in den letzten {params.days} Tagen gefunden [{lang.upper()}]."
+                + no_match_hint("**Tipp:** `days` erhöhen, z.B. `days=90`.")
             )
 
         out = result_header(len(bindings), f"AS-Publikationen seit {since_date} [{lang.upper()}]")
@@ -626,11 +662,19 @@ LIMIT {params.limit}
         return out
 
     except Exception as e:
-        return handle_error(e)
+        return await _fail(ctx, "fedlex_get_recent_publications", e)
 
 
 @mcp.tool(
     name="fedlex_get_upcoming_changes",
+    description=(
+        "Ruft Erlasse ab, die in den nächsten N Tagen in Kraft treten.\n"
+        "<use_case>Proaktives Rechtsmonitoring für Verwaltung und Schulen: welche "
+        "Gesetze werden bald wirksam (Datenschutz, Bildung, Regulierung)?</use_case>\n"
+        "<important_notes>Berücksichtigt nur künftige Inkraftsetzungen (dateEntryInForce "
+        "> heute). Fenster über `days_ahead` (1–365).</important_notes>\n"
+        "<example>days_ahead=90</example>"
+    ),
     annotations={
         "title": "Bevorstehende Rechtsänderungen abrufen",
         "readOnlyHint": True,
@@ -639,27 +683,15 @@ LIMIT {params.limit}
         "openWorldHint": True,
     },
 )
-async def fedlex_get_upcoming_changes(params: GetUpcomingChangesInput) -> str:
-    """Ruft Erlasse ab, die in den nächsten N Tagen in Kraft treten.
-
-    Proaktives Rechtsmonitoring für Verwaltung und Schulen: Welche Gesetze
-    werden bald wirksam? Z.B. neue Datenschutzregeln, Bildungsgesetze,
-    Regulierungen, auf die man sich vorbereiten muss.
-
-    Args:
-        params (GetUpcomingChangesInput):
-            - days_ahead (int): Vorausschau in Tagen (1–365). Standard: 90
-            - language (Language): Sprache. Standard: 'de'
-            - limit (int): Maximale Trefferzahl. Standard: 20
-
-    Returns:
-        str: Markdown-Liste bevorstehender Rechtsänderungen, chronologisch
-             mit SR-Nummer, Inkrafttretungsdatum und Link
-    """
+async def fedlex_get_upcoming_changes(
+    params: GetUpcomingChangesInput, ctx: Context | None = None
+) -> str:
+    """Ruft Erlasse ab, die in den nächsten N Tagen in Kraft treten."""
     lang = params.language.value
     suffix = LANG_SUFFIX[lang]
     today = date.today().isoformat()
     future = (date.today() + timedelta(days=params.days_ahead)).isoformat()
+    await _trace(ctx, "fedlex_get_upcoming_changes", lang=lang, days_ahead=params.days_ahead)
 
     query = f"""
 PREFIX jolux: <http://data.legilux.public.lu/resource/ontology/jolux#>
@@ -685,8 +717,8 @@ LIMIT {params.limit}
         if not bindings:
             return (
                 f"Keine bevorstehenden Rechtsänderungen in den nächsten "
-                f"{params.days_ahead} Tagen [{lang.upper()}].\n\n"
-                "**Tipp:** `days_ahead` erhöhen, z.B. `days_ahead=180`."
+                f"{params.days_ahead} Tagen [{lang.upper()}]."
+                + no_match_hint("**Tipp:** `days_ahead` erhöhen, z.B. `days_ahead=180`.")
             )
 
         out = result_header(
@@ -709,11 +741,19 @@ LIMIT {params.limit}
         return out
 
     except Exception as e:
-        return handle_error(e)
+        return await _fail(ctx, "fedlex_get_upcoming_changes", e)
 
 
 @mcp.tool(
     name="fedlex_search_gazette",
+    description=(
+        "Durchsucht das Bundesblatt (BBl) nach amtlichen Publikationen.\n"
+        "<use_case>Politisches Frühwarnsystem: Botschaften des Bundesrates, "
+        "Parlaments- und Volksinitiativen, Vernehmlassungen.</use_case>\n"
+        "<important_notes>BBl ≠ konsolidiertes Recht — für geltende Gesetze "
+        "`fedlex_search_laws` nutzen. Optional auf ein Jahr einschränken.</important_notes>\n"
+        "<example>keywords='Berufsbildung', year=2024</example>"
+    ),
     annotations={
         "title": "Im Bundesblatt (BBl) suchen",
         "readOnlyHint": True,
@@ -722,26 +762,12 @@ LIMIT {params.limit}
         "openWorldHint": True,
     },
 )
-async def fedlex_search_gazette(params: SearchGazetteInput) -> str:
-    """Durchsucht das Bundesblatt (BBl) nach amtlichen Publikationen.
-
-    Das BBl ist das offizielle Amtsblatt des Bundes: Botschaften des Bundesrates,
-    Parlamentsinitiativen, Volksinitiativanträge, Vernehmlassungsankündigungen
-    und weitere Bekanntmachungen. Nützlich für politisches Frühwarnsystem.
-
-    Args:
-        params (SearchGazetteInput):
-            - keywords (str): Suchbegriff im Publikationstitel
-            - language (Language): Sprache. Standard: 'de'
-            - year (Optional[int]): Nur dieses Jahr (z.B. 2024)
-            - limit (int): Maximale Trefferzahl. Standard: 20
-
-    Returns:
-        str: Markdown-Liste der gefundenen BBl-Publikationen mit Datum und Link
-    """
+async def fedlex_search_gazette(params: SearchGazetteInput, ctx: Context | None = None) -> str:
+    """Durchsucht das Bundesblatt (BBl) nach amtlichen Publikationen."""
     lang = params.language.value
     suffix = LANG_SUFFIX[lang]
     kw = params.keywords.lower()
+    await _trace(ctx, "fedlex_search_gazette", lang=lang, year=params.year)
 
     year_filter = (
         f'FILTER(STRSTARTS(STR(?pubDate), "{params.year}"))'
@@ -769,10 +795,11 @@ LIMIT {params.limit}
         yr_txt = f" ({params.year})" if params.year else ""
         if not bindings:
             return (
-                f"Keine BBl-Publikation für **'{params.keywords}'**{yr_txt} "
-                f"[{lang.upper()}].\n\n"
-                "**Tipps:** Allgemeineren Begriff verwenden | "
-                "Jahr weglassen | `fedlex_search_laws` für konsolidiertes Recht"
+                f"Keine BBl-Publikation für **'{params.keywords}'**{yr_txt} [{lang.upper()}]."
+                + no_match_hint(
+                    "**Tipps:** Allgemeineren Begriff verwenden | "
+                    "Jahr weglassen | `fedlex_search_laws` für konsolidiertes Recht"
+                )
             )
 
         out = result_header(
@@ -789,11 +816,19 @@ LIMIT {params.limit}
         return out
 
     except Exception as e:
-        return handle_error(e)
+        return await _fail(ctx, "fedlex_search_gazette", e)
 
 
 @mcp.tool(
     name="fedlex_get_law_history",
+    description=(
+        "Ruft die Versionsgeschichte (alle konsolidierten Fassungen) eines Erlasses ab.\n"
+        "<use_case>Nachvollziehen, wann welche Fassung galt — z.B. alte vs. revidierte "
+        "Gesetzesfassung (DSG 235.1: 1992 vs. nDSG 2020).</use_case>\n"
+        "<important_notes>Sortiert nach Inkrafttreten absteigend, max. 50 Fassungen. "
+        "SR-Nummer mit Punkt trennen.</important_notes>\n"
+        "<example>sr_number='235.1'</example>"
+    ),
     annotations={
         "title": "Versionsgeschichte eines Erlasses abrufen",
         "readOnlyHint": True,
@@ -802,23 +837,12 @@ LIMIT {params.limit}
         "openWorldHint": True,
     },
 )
-async def fedlex_get_law_history(params: GetLawHistoryInput) -> str:
-    """Ruft die Versionsgeschichte (alle konsolidierten Fassungen) eines Erlasses ab.
-
-    Zeigt alle historischen Versionen mit Inkrafttretensdatum und Status.
-    Z.B. für DSG 235.1: Wann galt die alte Fassung, wann trat die revidierte in Kraft?
-
-    Args:
-        params (GetLawHistoryInput):
-            - sr_number (str): SR-Nummer (z.B. '235.1', '412.10', '101')
-            - language (Language): Sprache. Standard: 'de'
-
-    Returns:
-        str: Markdown-Tabelle aller Versionen mit Datum, Status und Link
-    """
+async def fedlex_get_law_history(params: GetLawHistoryInput, ctx: Context | None = None) -> str:
+    """Ruft die Versionsgeschichte (alle konsolidierten Fassungen) eines Erlasses ab."""
     lang = params.language.value
     suffix = LANG_SUFFIX[lang]
     sr = params.sr_number.strip()
+    await _trace(ctx, "fedlex_get_law_history", lang=lang, sr_number=sr)
 
     query = f"""
 PREFIX jolux: <http://data.legilux.public.lu/resource/ontology/jolux#>
@@ -840,8 +864,8 @@ LIMIT 50
 
         if not bindings:
             return (
-                f"Keine Versionsgeschichte für SR-Nummer **{sr}** [{lang.upper()}].\n\n"
-                "**Tipp:** SR-Nummer mit `fedlex_get_law_by_sr` überprüfen."
+                f"Keine Versionsgeschichte für SR-Nummer **{sr}** [{lang.upper()}]."
+                + no_match_hint("**Tipp:** SR-Nummer mit `fedlex_get_law_by_sr` überprüfen.")
             )
 
         title_sample = val(bindings[0], "title", sr)
@@ -862,11 +886,19 @@ LIMIT 50
         return out
 
     except Exception as e:
-        return handle_error(e)
+        return await _fail(ctx, "fedlex_get_law_history", e)
 
 
 @mcp.tool(
     name="fedlex_search_treaties",
+    description=(
+        "Sucht internationale Staatsverträge der Schweiz (SR-Nummern beginnen mit '0.').\n"
+        "<use_case>Recherche zu bi-/multilateralen Abkommen: EU-Bilaterale, "
+        "Doppelbesteuerung, Europarats-Konventionen (Datenschutz, Menschenrechte).</use_case>\n"
+        "<important_notes>Ohne Suchbegriff werden die neuesten Verträge gelistet. "
+        "Sucht nur im Titel.</important_notes>\n"
+        "<example>keywords='Datenschutz'</example>"
+    ),
     annotations={
         "title": "Staatsverträge der Schweiz suchen",
         "readOnlyHint": True,
@@ -875,23 +907,11 @@ LIMIT 50
         "openWorldHint": True,
     },
 )
-async def fedlex_search_treaties(params: SearchTreatiesInput) -> str:
-    """Sucht internationale Staatsverträge der Schweiz (SR-Nummern beginnen mit '0.').
-
-    Umfasst bilaterale und multilaterale Abkommen: EU-Bilaterale, Doppelbesteuerungs-
-    abkommen, Europarats-Konventionen (Datenschutz, Menschenrechte), Bildungsabkommen.
-
-    Args:
-        params (SearchTreatiesInput):
-            - keywords (Optional[str]): Suchbegriff (z.B. 'Datenschutz', 'EU', 'Bildung')
-            - language (Language): Sprache. Standard: 'de'
-            - limit (int): Maximale Trefferzahl. Standard: 20
-
-    Returns:
-        str: Markdown-Liste der Staatsverträge mit SR-Nummer, Titel und Link
-    """
+async def fedlex_search_treaties(params: SearchTreatiesInput, ctx: Context | None = None) -> str:
+    """Sucht internationale Staatsverträge der Schweiz (SR-Nummern beginnen mit '0.')."""
     lang = params.language.value
     suffix = LANG_SUFFIX[lang]
+    await _trace(ctx, "fedlex_search_treaties", lang=lang, has_keywords=bool(params.keywords))
 
     kw_filter = (
         f'FILTER(CONTAINS(LCASE(STR(?title)), "{sparql_escape(params.keywords.lower())}"))'
@@ -919,8 +939,8 @@ LIMIT {params.limit}
         kw_txt = f"'{params.keywords}'" if params.keywords else "alle"
         if not bindings:
             return (
-                f"Keine Staatsverträge für {kw_txt} [{lang.upper()}].\n\n"
-                "**Tipp:** Suchbegriff anpassen oder weglassen."
+                f"Keine Staatsverträge für {kw_txt} [{lang.upper()}]."
+                + no_match_hint("**Tipp:** Suchbegriff anpassen oder weglassen.")
             )
 
         out = result_header(len(bindings), f"Staatsverträge {kw_txt} [{lang.upper()}]")
@@ -938,7 +958,7 @@ LIMIT {params.limit}
         return out
 
     except Exception as e:
-        return handle_error(e)
+        return await _fail(ctx, "fedlex_search_treaties", e)
 
 
 # ---------------------------------------------------------------------------
@@ -1014,7 +1034,7 @@ def _run_http() -> None:
             port = int(sys.argv[i + 1])
     # Cloud-Plattformen (Render etc.) geben den Port via $PORT vor.
     port = int(os.environ.get("PORT", port))
-    logger.info("Starte streamable-http auf %s:%s (CORS origins: %s)", host, port, origins)
+    log.info("http_start", host=host, port=port, cors_origins=origins)
     uvicorn.run(app, host=host, port=port)
 
 
