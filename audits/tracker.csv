@@ -1,0 +1,2 @@
+server_name,audit_status,findings,last_audit_run,last_audit_at,production_ready,released_version,notes
+fedlex-mcp,Re-audit: production-ready,2,2026-06-03T100302-Z-fedlex-mcp,,True,,
