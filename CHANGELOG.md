@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Shared HTTP client via FastMCP lifespan** — a single `httpx.AsyncClient` is now
+  created once per server lifecycle instead of per tool call (audit `SDK-001`).
+- **Settings/env-driven transport** — transport, host, port and CORS origins are
+  configured via `Settings` / `FEDLEX_*` env vars instead of an `argv` flag
+  (`ARCH-004`, `SCALE-001`). The `--http` flag still works for backward compatibility.
+
+### Added
+- **CORS for Streamable HTTP** exposing the `Mcp-Session-Id` header, required for
+  browser-based MCP clients (`SDK-004`).
+- **Input hardening** — `keywords`/`sr_number` now carry whitelist patterns and all
+  user input is escaped before SPARQL interpolation, closing a query-injection
+  vector (`SEC-004`, `SEC-018`).
+- **Code-layer egress allow-list** (`ALLOWED_EGRESS_HOSTS`) and stderr logging
+  (`SEC-021`, `OBS-004`).
+- **Real test suite** — 40 offline `respx`-mocked unit tests (tools, validation,
+  error masking) plus a `live` smoke test (`OPS-001`).
+
+### Fixed
+- Error handler no longer echoes raw exception detail to the LLM; internals are
+  logged server-side only (`OBS-001`, `OBS-002`).
+
 ## [0.1.0] - 2026-03-31
 
 ### Added

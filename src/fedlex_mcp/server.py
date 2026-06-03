@@ -20,17 +20,24 @@ JOLux-Datenmodell (verifiziert):
        .../1  Nicht mehr in der SR publiziert
        .../3  Nicht mehr in Kraft
 
-Transport: Dual — stdio (lokal) und SSE (Cloud/Render.com)
+Transport: Dual — stdio (lokal) und Streamable HTTP (Cloud/Render.com),
+wählbar über die Umgebungsvariable FEDLEX_TRANSPORT (stdio | streamable-http).
 """
 
 import json
+import logging
+import os
 import sys
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import date, timedelta
 from enum import StrEnum
 
 import httpx
 from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel, ConfigDict, Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # ---------------------------------------------------------------------------
 # Konstanten
@@ -38,9 +45,22 @@ from pydantic import BaseModel, ConfigDict, Field
 
 SPARQL_ENDPOINT = "https://fedlex.data.admin.ch/sparqlendpoint"
 FEDLEX_BASE_URL = "https://www.fedlex.admin.ch"
+FEDLEX_DATA_HOST = "fedlex.data.admin.ch"
 REQUEST_TIMEOUT = 45
 MAX_RESULTS_DEFAULT = 20
 MAX_RESULTS_LIMIT = 100
+
+# Defense-in-depth: der Server spricht ausschliesslich diesen einen Endpoint an
+# (SEC-021 Egress-Allow-List auf Code-Ebene).
+ALLOWED_EGRESS_HOSTS = frozenset({FEDLEX_DATA_HOST})
+
+# Whitelist-Pattern für Freitext-Suchbegriffe (SEC-018). Erlaubt Buchstaben
+# (inkl. Umlaute/Akzente via Unicode-\w), Ziffern, Leerzeichen und gängige
+# Interpunktion — aber keine Anführungszeichen, Backslashes oder geschweiften
+# Klammern, mit denen man aus einem SPARQL-Literal ausbrechen könnte.
+KEYWORD_PATTERN = r"^[\w\s.\-'’(),:/&+]+$"
+# SR-Nummern: nur Zifferngruppen, durch Punkte getrennt (z.B. 101, 235.1, 0.101).
+SR_NUMBER_PATTERN = r"^\d{1,3}(\.\d+)*$"
 
 LANG_SUFFIX = {"de": "/de", "fr": "/fr", "it": "/it", "rm": "/rm"}
 
@@ -56,19 +76,38 @@ STATUS_LABELS = {
 
 FEDLEX_SOURCE = "\n---\n*Quelle: Fedlex, Schweizerische Bundeskanzlei (fedlex.admin.ch)*"
 
+# Logging geht bewusst auf STDERR — bei stdio-Transport ist STDOUT exklusiv für
+# das JSON-RPC-Protokoll reserviert (OBS-004).
+logging.basicConfig(
+    level=logging.INFO,
+    stream=sys.stderr,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
+logger = logging.getLogger("fedlex_mcp")
+
 # ---------------------------------------------------------------------------
-# Server-Initialisierung
+# Konfiguration (Settings statt globaler Module-Vars — ARCH-004)
 # ---------------------------------------------------------------------------
 
-mcp = FastMCP(
-    "fedlex_mcp",
-    instructions=(
-        "MCP-Server für das Schweizer Bundesrecht (Fedlex). "
-        "Zugriff auf die Systematische Rechtssammlung (SR), "
-        "Amtliche Sammlung (AS), Bundesblatt (BBl) und Staatsverträge. "
-        "Alle Daten stammen vom SPARQL-Endpoint der Schweizerischen Bundeskanzlei."
-    ),
-)
+
+class Settings(BaseSettings):
+    """Laufzeit-Konfiguration, vollständig über Env-Vars steuerbar.
+
+    Transport-Wahl, Host/Port und CORS-Origins kommen aus der Umgebung, damit
+    derselbe Code lokal (stdio) und in der Cloud (streamable-http) läuft, ohne
+    Code-Fork.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="FEDLEX_", extra="ignore")
+
+    transport: str = "stdio"  # stdio | streamable-http
+    host: str = "127.0.0.1"
+    port: int = 8000
+    # Kommagetrennte Origin-Liste; in Produktion explizit setzen, kein "*".
+    allowed_origins: str = "http://localhost,http://127.0.0.1"
+
+
+settings = Settings()
 
 # ---------------------------------------------------------------------------
 # Geteilte Infrastruktur
@@ -84,16 +123,70 @@ class Language(StrEnum):
     RM = "rm"
 
 
-async def run_sparql(query: str) -> list[dict]:
-    """Führt SPARQL-Abfrage gegen den Fedlex-Endpoint aus, gibt Bindings zurück."""
+@dataclass
+class AppContext:
+    """Über den Lifespan geteilte Ressourcen."""
+
+    client: httpx.AsyncClient
+
+
+# Ein einziger, über den Server-Lifecycle geteilter HTTP-Client (SDK-001).
+# Wird im Lifespan erstellt und sauber geschlossen — kein Client pro Tool-Call.
+_http_client: httpx.AsyncClient | None = None
+
+
+@asynccontextmanager
+async def lifespan(_server: FastMCP) -> AsyncIterator[AppContext]:
+    """Erstellt den geteilten HTTP-Client und schliesst ihn beim Shutdown."""
+    global _http_client
     async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
-        response = await client.get(
-            SPARQL_ENDPOINT,
-            params={"query": query, "format": "application/sparql-results+json"},
-            headers={"Accept": "application/sparql-results+json"},
-        )
-        response.raise_for_status()
-        return response.json().get("results", {}).get("bindings", [])
+        _http_client = client
+        logger.info("fedlex-mcp lifespan gestartet (shared httpx client)")
+        try:
+            yield AppContext(client=client)
+        finally:
+            _http_client = None
+            logger.info("fedlex-mcp lifespan beendet")
+
+
+def sparql_escape(value: str) -> str:
+    """Escaped einen String für die sichere Interpolation in ein SPARQL-Literal.
+
+    Verhindert das Ausbrechen aus doppelt-gequoteten SPARQL-Literalen
+    (SEC-004 / SEC-018). Wird zusätzlich zur Pydantic-Pattern-Validierung als
+    Defense-in-Depth angewandt.
+    """
+    return (
+        value.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+        .replace("\t", "\\t")
+    )
+
+
+async def run_sparql(query: str, client: httpx.AsyncClient | None = None) -> list[dict]:
+    """Führt SPARQL-Abfrage gegen den Fedlex-Endpoint aus, gibt Bindings zurück.
+
+    Nutzt standardmässig den über den Lifespan geteilten Client. Fällt nur dann
+    auf einen Ad-hoc-Client zurück, wenn kein Lifespan aktiv ist (z.B. in
+    isolierten Skripten/Tests).
+    """
+    active = client or _http_client
+    if active is not None:
+        return await _execute_sparql(active, query)
+    async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as tmp:
+        return await _execute_sparql(tmp, query)
+
+
+async def _execute_sparql(client: httpx.AsyncClient, query: str) -> list[dict]:
+    response = await client.get(
+        SPARQL_ENDPOINT,
+        params={"query": query, "format": "application/sparql-results+json"},
+        headers={"Accept": "application/sparql-results+json"},
+    )
+    response.raise_for_status()
+    return response.json().get("results", {}).get("bindings", [])
 
 
 def val(binding: dict, key: str, default: str = "") -> str:
@@ -116,7 +209,12 @@ def status_label(status_uri: str) -> str:
 
 
 def handle_error(e: Exception) -> str:
-    """Einheitliche, handlungsweisende Fehlermeldungen."""
+    """Einheitliche, handlungsweisende Fehlermeldungen.
+
+    Interne Exception-Details werden ausschliesslich serverseitig geloggt und
+    nie an das LLM zurückgegeben (OBS-001 / OBS-002).
+    """
+    logger.warning("Fedlex tool error: %s: %s", type(e).__name__, e)
     if isinstance(e, httpx.HTTPStatusError):
         code = e.response.status_code
         if code == 400:
@@ -133,13 +231,28 @@ def handle_error(e: Exception) -> str:
         )
     if isinstance(e, httpx.ConnectError):
         return "Fehler: Verbindung zu Fedlex fehlgeschlagen. Internetverbindung prüfen."
-    return f"Fehler: {type(e).__name__}: {e}"
+    return "Fehler: Unerwarteter Fehler beim Abruf vom Fedlex-Endpoint. Bitte erneut versuchen."
 
 
 def result_header(count: int, desc: str) -> str:
     """Standardisierter Ergebnisheader."""
     return f"## Fedlex — {desc}\n**Treffer:** {count}\n\n"
 
+
+# ---------------------------------------------------------------------------
+# Server-Initialisierung
+# ---------------------------------------------------------------------------
+
+mcp = FastMCP(
+    "fedlex_mcp",
+    instructions=(
+        "MCP-Server für das Schweizer Bundesrecht (Fedlex). "
+        "Zugriff auf die Systematische Rechtssammlung (SR), "
+        "Amtliche Sammlung (AS), Bundesblatt (BBl) und Staatsverträge. "
+        "Alle Daten stammen vom SPARQL-Endpoint der Schweizerischen Bundeskanzlei."
+    ),
+    lifespan=lifespan,
+)
 
 # ---------------------------------------------------------------------------
 # Input-Modelle
@@ -151,7 +264,7 @@ class SearchLawsInput(BaseModel):
     keywords: str = Field(
         ...,
         description="Suchbegriff(e) im Erlasstittel, z.B. 'Volksschule', 'Datenschutz', 'Berufsbildung'",
-        min_length=2, max_length=200,
+        min_length=2, max_length=200, pattern=KEYWORD_PATTERN,
     )
     language: Language = Field(default=Language.DE, description="Sprache: 'de', 'fr', 'it', 'rm'")
     in_force_only: bool = Field(default=True, description="Nur gültige Erlasse (Standard: True)")
@@ -164,7 +277,7 @@ class GetLawBySrInput(BaseModel):
     sr_number: str = Field(
         ...,
         description="SR-Nummer, z.B. '101' (BV), '235.1' (DSG), '412.10' (BBG), '170.32' (VG)",
-        min_length=1, max_length=20,
+        min_length=1, max_length=20, pattern=SR_NUMBER_PATTERN,
     )
     language: Language = Field(default=Language.DE)
 
@@ -188,7 +301,7 @@ class SearchGazetteInput(BaseModel):
     keywords: str = Field(
         ...,
         description="Suchbegriff im BBl-Titel, z.B. 'Berufsbildung', 'Datenschutz', 'Volksinitiative'",
-        min_length=2, max_length=200,
+        min_length=2, max_length=200, pattern=KEYWORD_PATTERN,
     )
     language: Language = Field(default=Language.DE)
     year: int | None = Field(default=None, ge=1999, le=2030,
@@ -201,7 +314,7 @@ class GetLawHistoryInput(BaseModel):
     sr_number: str = Field(
         ...,
         description="SR-Nummer, z.B. '235.1' (DSG), '412.10' (BBG), '101' (BV)",
-        min_length=1, max_length=20,
+        min_length=1, max_length=20, pattern=SR_NUMBER_PATTERN,
     )
     language: Language = Field(default=Language.DE)
 
@@ -211,7 +324,7 @@ class SearchTreatiesInput(BaseModel):
     keywords: str | None = Field(
         default=None,
         description="Suchbegriff im Titel, z.B. 'Bildung', 'EU', 'Datenschutz'. Ohne Begriff: neueste Verträge.",
-        max_length=200,
+        max_length=200, pattern=KEYWORD_PATTERN,
     )
     language: Language = Field(default=Language.DE)
     limit: int = Field(default=MAX_RESULTS_DEFAULT, ge=1, le=MAX_RESULTS_LIMIT)
@@ -269,7 +382,7 @@ SELECT DISTINCT ?ca ?title ?titleShort ?srNumber ?inForceStatus WHERE {{
   OPTIONAL {{ ?ca jolux:inForceStatus ?inForceStatus . }}
   FILTER(STRENDS(STR(?expr), "{suffix}"))
   FILTER(STRSTARTS(STR(?ca), "https://fedlex.data.admin.ch/eli/cc/"))
-  FILTER(CONTAINS(LCASE(STR(?title)), "{kw}"))
+  FILTER(CONTAINS(LCASE(STR(?title)), "{sparql_escape(kw)}"))
   {in_force_filter}
 }} ORDER BY ?srNumber
 LIMIT {params.limit}
@@ -393,7 +506,7 @@ SELECT DISTINCT ?ca ?title ?titleShort ?srNumber ?inForceStatus ?entryDate WHERE
   OPTIONAL {{ ?ca jolux:inForceStatus ?inForceStatus . }}
   OPTIONAL {{ ?ca jolux:dateEntryInForce ?entryDate . }}
   FILTER(STRENDS(STR(?expr), "{suffix}"))
-  FILTER(STR(?srNumber) = "{sr}")
+  FILTER(STR(?srNumber) = "{sparql_escape(sr)}")
 }} ORDER BY DESC(?entryDate)
 LIMIT 10
 """
@@ -436,7 +549,7 @@ SELECT DISTINCT ?ca ?title ?titleShort ?srNumber ?inForceStatus ?entryDate WHERE
   OPTIONAL {{ ?ca jolux:dateEntryInForce ?entryDate . }}
   FILTER(STRENDS(STR(?expr), "{suffix}"))
   FILTER(STRSTARTS(STR(?ca), "https://fedlex.data.admin.ch/eli/cc/"))
-  FILTER(STR(?titleShort) = "{short_name}")
+  FILTER(STR(?titleShort) = "{sparql_escape(short_name)}")
 }} LIMIT 1
 """
                 succ_bindings = await run_sparql(succ_query)
@@ -455,7 +568,7 @@ SELECT DISTINCT ?ca ?title ?titleShort ?srNumber ?inForceStatus ?entryDate WHERE
         "title": "Neueste Bundesrechtspublikationen (AS) abrufen",
         "readOnlyHint": True,
         "destructiveHint": False,
-        "idempotentHint": False,
+        "idempotentHint": True,
         "openWorldHint": True,
     },
 )
@@ -522,7 +635,7 @@ LIMIT {params.limit}
         "title": "Bevorstehende Rechtsänderungen abrufen",
         "readOnlyHint": True,
         "destructiveHint": False,
-        "idempotentHint": False,
+        "idempotentHint": True,
         "openWorldHint": True,
     },
 )
@@ -644,7 +757,7 @@ SELECT DISTINCT ?act ?title ?pubDate WHERE {{
   ?expr jolux:title ?title .
   FILTER(STRENDS(STR(?expr), "{suffix}"))
   FILTER(STRSTARTS(STR(?act), "https://fedlex.data.admin.ch/eli/fga/"))
-  FILTER(CONTAINS(LCASE(STR(?title)), "{kw}"))
+  FILTER(CONTAINS(LCASE(STR(?title)), "{sparql_escape(kw)}"))
   {year_filter}
 }} ORDER BY DESC(?pubDate)
 LIMIT {params.limit}
@@ -717,7 +830,7 @@ SELECT DISTINCT ?ca ?title ?srNumber ?entryDate ?inForceStatus WHERE {{
   OPTIONAL {{ ?ca jolux:dateEntryInForce ?entryDate . }}
   OPTIONAL {{ ?ca jolux:inForceStatus ?inForceStatus . }}
   FILTER(STRENDS(STR(?expr), "{suffix}"))
-  FILTER(STR(?srNumber) = "{sr}")
+  FILTER(STR(?srNumber) = "{sparql_escape(sr)}")
 }} ORDER BY DESC(?entryDate)
 LIMIT 50
 """
@@ -781,7 +894,7 @@ async def fedlex_search_treaties(params: SearchTreatiesInput) -> str:
     suffix = LANG_SUFFIX[lang]
 
     kw_filter = (
-        f'FILTER(CONTAINS(LCASE(STR(?title)), "{params.keywords.lower()}"))'
+        f'FILTER(CONTAINS(LCASE(STR(?title)), "{sparql_escape(params.keywords.lower())}"))'
         if params.keywords else ""
     )
 
@@ -870,15 +983,44 @@ async def get_server_info() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Entry point — Dual Transport
+# Entry point — Dual Transport (Settings-/Env-gesteuert, ARCH-004 / SCALE-001)
 # ---------------------------------------------------------------------------
 
+
+def _run_http() -> None:
+    """Startet den Streamable-HTTP-Transport mit CORS (SDK-004).
+
+    CORS exponiert den `Mcp-Session-Id`-Header, ohne den Browser-basierte
+    MCP-Clients keine Folge-Requests an dieselbe Session schicken können.
+    """
+    import uvicorn
+    from starlette.middleware.cors import CORSMiddleware
+
+    origins = [o.strip() for o in settings.allowed_origins.split(",") if o.strip()]
+
+    app = mcp.streamable_http_app()
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=origins,
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["Content-Type", "Mcp-Session-Id"],
+        expose_headers=["Mcp-Session-Id"],
+    )
+
+    host = os.environ.get("FEDLEX_HOST", settings.host)
+    port = settings.port
+    for i, arg in enumerate(sys.argv):
+        if arg == "--port" and i + 1 < len(sys.argv):
+            port = int(sys.argv[i + 1])
+    # Cloud-Plattformen (Render etc.) geben den Port via $PORT vor.
+    port = int(os.environ.get("PORT", port))
+    logger.info("Starte streamable-http auf %s:%s (CORS origins: %s)", host, port, origins)
+    uvicorn.run(app, host=host, port=port)
+
+
 if __name__ == "__main__":
-    if "--http" in sys.argv:
-        port = 8000
-        for i, arg in enumerate(sys.argv):
-            if arg == "--port" and i + 1 < len(sys.argv):
-                port = int(sys.argv[i + 1])
-        mcp.run(transport="streamable-http", port=port)
+    use_http = settings.transport in ("streamable-http", "http", "sse") or "--http" in sys.argv
+    if use_http:
+        _run_http()
     else:
         mcp.run()
