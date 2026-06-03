@@ -39,7 +39,7 @@ dev = [
     "pytest-asyncio>=0.23.0",
     "pytest-cov>=5.0.0",
     "respx>=0.21.0",
-    "ruff>=0.4.0",
+    "ruff>=0.15.15",
 ]
 # Optional OpenTelemetry tracing (OBS-006). Enabled at runtime only when
 # OTEL_EXPORTER_OTLP_ENDPOINT is set; otherwise a complete no-op.
