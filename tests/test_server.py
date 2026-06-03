@@ -3,10 +3,17 @@
 Network is mocked with respx so the suite is fully offline (CI: pytest -m
 'not live'). A single live smoke test against the real SPARQL endpoint is
 marked `live` and skipped by default.
+
+Tools return a structured ``FedlexResponse`` envelope (SDK-002): assertions
+check ``.results`` / ``.match_type`` / ``.count`` for structure and ``.markdown``
+for the human-readable rendering.
 """
 from __future__ import annotations
 
+import asyncio
+import json
 import re
+from pathlib import Path
 
 import httpx
 import pytest
@@ -30,12 +37,10 @@ ENDPOINT = server.SPARQL_ENDPOINT
 
 
 def _sparql_response(bindings: list[dict]) -> httpx.Response:
-    """Build a SPARQL-results+json HTTP response from a list of bindings."""
     return httpx.Response(200, json={"results": {"bindings": bindings}})
 
 
 def _binding(**fields: str) -> dict:
-    """Shorthand: {"key": {"value": v}} for each kwarg."""
     return {k: {"value": v} for k, v in fields.items()}
 
 
@@ -44,9 +49,7 @@ def _binding(**fields: str) -> dict:
 # ---------------------------------------------------------------------------
 
 def test_sparql_escape_neutralises_quote_breakout() -> None:
-    """A double quote / backslash must be escaped, not passed through raw."""
-    escaped = sparql_escape('foo" } INJECT')
-    assert escaped == 'foo\\" } INJECT'
+    assert sparql_escape('foo" } INJECT') == 'foo\\" } INJECT'
 
 
 def test_sparql_escape_handles_backslash_and_newline() -> None:
@@ -63,8 +66,14 @@ def test_fedlex_url_rewrites_data_uri() -> None:
     assert url == "https://www.fedlex.admin.ch/eli/cc/235.1/fr"
 
 
+def test_assert_host_allowed_blocks_foreign_host() -> None:
+    server.assert_host_allowed(ENDPOINT)  # allow-listed -> no raise
+    with pytest.raises(PermissionError):
+        server.assert_host_allowed("https://evil.example.com/x")
+
+
 # ---------------------------------------------------------------------------
-# Input validation (SEC-018) — patterns reject injection / malformed input
+# Input validation (SEC-018)
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("bad", ['a" } INJECT', "back\\slash", "brace{", "<tag>"])
@@ -100,7 +109,7 @@ def test_limit_out_of_range_rejected() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Tool happy-paths (respx-mocked SPARQL)
+# Tool happy-paths — structured envelope (SDK-002)
 # ---------------------------------------------------------------------------
 
 @respx.mock
@@ -111,20 +120,25 @@ async def test_search_laws_happy() -> None:
                  title="Bundesgesetz über den Datenschutz", titleShort="DSG",
                  srNumber="235.1", inForceStatus=server.STATUS_IN_FORCE),
     ]))
-    out = await server.fedlex_search_laws(SearchLawsInput(keywords="Datenschutz"))
-    assert "SR 235.1" in out
-    assert "DSG" in out
-    assert "In Kraft" in out
-    assert "Quelle: Fedlex" in out
+    resp = await server.fedlex_search_laws(SearchLawsInput(keywords="Datenschutz"))
+    assert resp.match_type == "exact"
+    assert resp.count == 1
+    assert resp.results[0]["sr_number"] == "235.1"
+    assert resp.results[0]["title_short"] == "DSG"
+    assert resp.results[0]["url"].startswith("https://www.fedlex.admin.ch/")
+    assert resp.source.startswith("Fedlex")
+    assert "DSG" in resp.markdown
 
 
 @respx.mock
 @pytest.mark.asyncio
-async def test_search_laws_empty_gives_actionable_hint() -> None:
+async def test_search_laws_empty_envelope() -> None:
     respx.get(ENDPOINT).mock(return_value=_sparql_response([]))
-    out = await server.fedlex_search_laws(SearchLawsInput(keywords="zzzznope"))
-    assert "Keine Erlasse" in out
-    assert "Tipps" in out
+    resp = await server.fedlex_search_laws(SearchLawsInput(keywords="zzzznope"))
+    assert resp.match_type == "none"
+    assert resp.count == 0
+    assert resp.results == []
+    assert "match_type: none" in resp.markdown
 
 
 @respx.mock
@@ -135,9 +149,10 @@ async def test_get_law_by_sr_happy() -> None:
                  title="Bundesverfassung", titleShort="BV", srNumber="101",
                  inForceStatus=server.STATUS_IN_FORCE, entryDate="2000-01-01"),
     ]))
-    out = await server.fedlex_get_law_by_sr(GetLawBySrInput(sr_number="101"))
-    assert "Bundesverfassung" in out
-    assert "BV" in out
+    resp = await server.fedlex_get_law_by_sr(GetLawBySrInput(sr_number="101"))
+    assert resp.count == 1
+    assert resp.results[0]["title"] == "Bundesverfassung"
+    assert "Bundesverfassung" in resp.markdown
 
 
 @respx.mock
@@ -147,9 +162,9 @@ async def test_get_recent_publications_happy() -> None:
         _binding(act="https://fedlex.data.admin.ch/eli/oc/2026/1",
                  title="Neue Verordnung", pubDate="2026-05-01"),
     ]))
-    out = await server.fedlex_get_recent_publications(GetRecentPublicationsInput(days=30))
-    assert "Neue Verordnung" in out
-    assert "2026-05-01" in out
+    resp = await server.fedlex_get_recent_publications(GetRecentPublicationsInput(days=30))
+    assert resp.results[0]["publication_date"] == "2026-05-01"
+    assert "Neue Verordnung" in resp.markdown
 
 
 @respx.mock
@@ -160,9 +175,9 @@ async def test_get_upcoming_changes_happy() -> None:
                  title="Künftiges Gesetz", titleShort="KG", srNumber="999",
                  entryDate="2026-12-01"),
     ]))
-    out = await server.fedlex_get_upcoming_changes(GetUpcomingChangesInput(days_ahead=90))
-    assert "Künftiges Gesetz" in out
-    assert "2026-12-01" in out
+    resp = await server.fedlex_get_upcoming_changes(GetUpcomingChangesInput(days_ahead=90))
+    assert resp.results[0]["entry_date"] == "2026-12-01"
+    assert "Künftiges Gesetz" in resp.markdown
 
 
 @respx.mock
@@ -172,8 +187,9 @@ async def test_search_gazette_happy() -> None:
         _binding(act="https://fedlex.data.admin.ch/eli/fga/2024/1",
                  title="Botschaft zur Berufsbildung", pubDate="2024-03-01"),
     ]))
-    out = await server.fedlex_search_gazette(SearchGazetteInput(keywords="Berufsbildung", year=2024))
-    assert "Botschaft zur Berufsbildung" in out
+    resp = await server.fedlex_search_gazette(SearchGazetteInput(keywords="Berufsbildung", year=2024))
+    assert resp.count == 1
+    assert "Berufsbildung" in resp.markdown
 
 
 @respx.mock
@@ -187,9 +203,10 @@ async def test_get_law_history_happy() -> None:
                  title="DSG", srNumber="235.1", entryDate="1993-07-01",
                  inForceStatus=server.STATUS_NO_LONGER_FORCE),
     ]))
-    out = await server.fedlex_get_law_history(GetLawHistoryInput(sr_number="235.1"))
-    assert "Versionsgeschichte" in out
-    assert "1993-07-01" in out and "2023-09-01" in out
+    resp = await server.fedlex_get_law_history(GetLawHistoryInput(sr_number="235.1"))
+    assert resp.count == 2
+    assert {r["version"] for r in resp.results} == {1, 2}
+    assert "Versionsgeschichte" in resp.markdown
 
 
 @respx.mock
@@ -199,30 +216,32 @@ async def test_search_treaties_happy() -> None:
         _binding(ca="https://fedlex.data.admin.ch/eli/cc/0.101",
                  title="EMRK", srNumber="0.101", entryDate="1974-11-28"),
     ]))
-    out = await server.fedlex_search_treaties(SearchTreatiesInput(keywords="EMRK"))
-    assert "0.101" in out
+    resp = await server.fedlex_search_treaties(SearchTreatiesInput(keywords="EMRK"))
+    assert resp.results[0]["sr_number"] == "0.101"
 
 
 # ---------------------------------------------------------------------------
-# Error handling (OBS-001 / OBS-002) — no internal details leak to the LLM
+# Error handling (OBS-001 / OBS-002) — masked, structured error envelope
 # ---------------------------------------------------------------------------
 
 @respx.mock
 @pytest.mark.asyncio
-async def test_http_400_returns_friendly_message() -> None:
+async def test_http_400_returns_error_envelope() -> None:
     respx.get(ENDPOINT).mock(return_value=httpx.Response(400, text="boom"))
-    out = await server.fedlex_search_laws(SearchLawsInput(keywords="Datenschutz"))
-    assert "HTTP 400" in out
-    assert "boom" not in out  # upstream body must not leak
+    resp = await server.fedlex_search_laws(SearchLawsInput(keywords="Datenschutz"))
+    assert resp.match_type == "error"
+    assert "HTTP 400" in resp.markdown
+    assert "boom" not in resp.markdown
 
 
 @respx.mock
 @pytest.mark.asyncio
 async def test_connect_error_is_masked() -> None:
     respx.get(ENDPOINT).mock(side_effect=httpx.ConnectError("dns fail"))
-    out = await server.fedlex_search_laws(SearchLawsInput(keywords="Datenschutz"))
-    assert "Verbindung zu Fedlex" in out
-    assert "dns fail" not in out
+    resp = await server.fedlex_search_laws(SearchLawsInput(keywords="Datenschutz"))
+    assert resp.match_type == "error"
+    assert "Verbindung zu Fedlex" in resp.markdown
+    assert "dns fail" not in resp.markdown
 
 
 def test_handle_error_generic_does_not_leak_repr() -> None:
@@ -232,11 +251,10 @@ def test_handle_error_generic_does_not_leak_repr() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Config / wiring
+# Config / wiring / observability
 # ---------------------------------------------------------------------------
 
 def test_shared_client_default_is_none_outside_lifespan() -> None:
-    """The shared client is created by the lifespan, not at import time."""
     assert server._http_client is None
 
 
@@ -250,40 +268,50 @@ def test_egress_allow_list_is_frozen() -> None:
     assert server.FEDLEX_DATA_HOST in server.ALLOWED_EGRESS_HOSTS
 
 
-def test_server_imports() -> None:
-    assert hasattr(server, "mcp")
-
-
 def test_structured_logger_available() -> None:
-    """OBS-003: a structlog logger is configured at module level."""
     assert server.log is not None
     assert hasattr(server.log, "info")
 
 
-@respx.mock
-@pytest.mark.asyncio
-async def test_empty_result_marks_match_type_none() -> None:
-    """ARCH-003: empty results carry a machine-readable match_type marker."""
-    respx.get(ENDPOINT).mock(return_value=_sparql_response([]))
-    out = await server.fedlex_search_laws(SearchLawsInput(keywords="zzzznope"))
-    assert "match_type: none" in out
+def test_tracing_disabled_by_default() -> None:
+    """OBS-006: OpenTelemetry is a no-op unless explicitly configured."""
+    assert server._tracer is None
+
+
+def test_server_imports() -> None:
+    assert hasattr(server, "mcp")
 
 
 @respx.mock
 @pytest.mark.asyncio
 async def test_tool_accepts_ctx_none() -> None:
-    """SDK-003: tools take an optional ctx and work when it is absent."""
     respx.get(ENDPOINT).mock(return_value=_sparql_response([
         _binding(ca="https://fedlex.data.admin.ch/eli/cc/101", title="BV", srNumber="101"),
     ]))
-    out = await server.fedlex_search_laws(SearchLawsInput(keywords="Verfassung"), ctx=None)
-    assert "101" in out
+    resp = await server.fedlex_search_laws(SearchLawsInput(keywords="Verfassung"), ctx=None)
+    assert resp.count == 1
 
 
 @pytest.mark.parametrize("sr_number", ["101", "210.10", "172.021"])
 def test_sr_number_format_valid(sr_number: str) -> None:
-    """SR numbers in correct format match the documented pattern."""
     assert re.match(server.SR_NUMBER_PATTERN, sr_number)
+
+
+# ---------------------------------------------------------------------------
+# Tool-definition hash pinning (SEC-022)
+# ---------------------------------------------------------------------------
+
+def test_tool_definitions_match_lock() -> None:
+    """The live tool definitions must match the committed lock file. If this
+    fails, a tool changed — regenerate with scripts/snapshot_tools.py and note
+    it in CHANGELOG.md (rug-pull guard)."""
+    lock_path = Path(__file__).resolve().parent.parent / "tool-definitions.lock.json"
+    lock = json.loads(lock_path.read_text(encoding="utf-8"))
+    live = asyncio.run(server.compute_tool_signature_hash())
+    assert live == lock["sha256"], (
+        "Tool definitions drifted from tool-definitions.lock.json. "
+        "Run: PYTHONPATH=src python scripts/snapshot_tools.py"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -293,6 +321,5 @@ def test_sr_number_format_valid(sr_number: str) -> None:
 @pytest.mark.live
 @pytest.mark.asyncio
 async def test_live_sparql_endpoint() -> None:
-    """Hits the real Fedlex endpoint; run with: pytest -m live."""
-    out = await server.fedlex_get_law_by_sr(GetLawBySrInput(sr_number="101", language=Language.DE))
-    assert "101" in out
+    resp = await server.fedlex_get_law_by_sr(GetLawBySrInput(sr_number="101", language=Language.DE))
+    assert "101" in resp.markdown

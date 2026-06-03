@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (Sprint 3 audit remediation)
+- **Structured response envelope** `FedlexResponse` for all 7 tools — `source`,
+  `license`, `match_type`, `count`, `results[]` (each with `uri`/`url`
+  provenance) plus a `markdown` field that preserves the human-readable
+  rendering (`SDK-002`, `CH-004`).
+- **Tool-definition hash pinning** — `tool-definitions.lock.json` +
+  `scripts/snapshot_tools.py` + a test that fails on silent tool drift
+  (`SEC-022`).
+- **Optional OpenTelemetry tracing** (`pip install 'fedlex-mcp[otel]'`):
+  per-tool spans and httpx auto-instrumentation, activated only when
+  `OTEL_EXPORTER_OTLP_ENDPOINT` is set — otherwise a no-op (`OBS-006`).
+- **Egress host assertion** `assert_host_allowed()` before every request, and
+  ADR `docs/adr/0001-egress-trifecta-and-dns.md` documenting the egress
+  allow-list, lethal-trifecta posture and the accepted DNS-rebinding risk
+  (`SEC-021`, `SEC-019`, `SEC-005`).
+
+### Note
+Tools now return JSON (structured content) in addition to Markdown; clients
+that previously rendered the Markdown string will see the structured envelope.
+
 ### Added (Sprint 2 audit remediation)
 - **Structured logging** with `structlog` — JSON to stderr, per-call bound
   context (`OBS-003`, keeps stdout clean for stdio per `OBS-004`).

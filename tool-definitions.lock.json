@@ -1,0 +1,14 @@
+{
+  "sha256": "b6e0eb969b6fd7d32962167adedb463c3074c6f613e7d8be7d1d19fd7e086ee6",
+  "tool_count": 7,
+  "tools": [
+    "fedlex_get_law_by_sr",
+    "fedlex_get_law_history",
+    "fedlex_get_recent_publications",
+    "fedlex_get_upcoming_changes",
+    "fedlex_search_gazette",
+    "fedlex_search_laws",
+    "fedlex_search_treaties"
+  ],
+  "generated_on": "2026-06-03"
+}
