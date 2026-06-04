@@ -217,7 +217,10 @@ fedlex-mcp/
 +-- .github/workflows/ci.yml     # GitHub Actions (Python 3.11/3.12/3.13)
 +-- pyproject.toml
 +-- CHANGELOG.md
-+-- CONTRIBUTING.md
++-- CONTRIBUTING.md               # Mitwirken-Leitfaden (Englisch)
++-- CONTRIBUTING.de.md            # Mitwirken-Leitfaden (Deutsch)
++-- SECURITY.md                   # Sicherheitsrichtlinie (Englisch)
++-- SECURITY.de.md                # Sicherheitsrichtlinie (Deutsch)
 +-- LICENSE
 +-- README.md                    # Englische Hauptversion
 +-- README.de.md                 # Diese Datei (Deutsch)
@@ -263,9 +266,15 @@ Siehe [CHANGELOG.md](CHANGELOG.md)
 
 ---
 
+## Sicherheit
+
+Siehe [SECURITY.md](SECURITY.md) (bzw. [SECURITY.de.md](SECURITY.de.md)) für die Sicherheitslage, Härtungsmassnahmen und das Melden von Schwachstellen.
+
+---
+
 ## Mitwirken
 
-Siehe [CONTRIBUTING.md](CONTRIBUTING.md)
+Siehe [CONTRIBUTING.md](CONTRIBUTING.md) (bzw. [CONTRIBUTING.de.md](CONTRIBUTING.de.md))
 
 ---
 
