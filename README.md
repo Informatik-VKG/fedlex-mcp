@@ -217,7 +217,10 @@ fedlex-mcp/
 +-- .github/workflows/ci.yml     # GitHub Actions (Python 3.11/3.12/3.13)
 +-- pyproject.toml
 +-- CHANGELOG.md
-+-- CONTRIBUTING.md
++-- CONTRIBUTING.md               # Contributing guide (English)
++-- CONTRIBUTING.de.md            # Contributing guide (German)
++-- SECURITY.md                   # Security policy (English)
++-- SECURITY.de.md                # Security policy (German)
 +-- LICENSE
 +-- README.md                    # This file (English)
 +-- README.de.md                 # German version
@@ -288,6 +291,12 @@ pytest tests/ -m "live"
 ## Changelog
 
 See [CHANGELOG.md](CHANGELOG.md)
+
+---
+
+## Security
+
+See [SECURITY.md](SECURITY.md) for the security posture, hardening controls, and how to report a vulnerability.
 
 ---
 
