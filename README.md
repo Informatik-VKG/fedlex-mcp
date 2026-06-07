@@ -326,3 +326,5 @@ Hayal Oezkan . [malkreide](https://github.com/malkreide)
 - **Related:** [zurich-opendata-mcp](https://github.com/malkreide/zurich-opendata-mcp) — City of Zurich open data
 - **Related:** [swiss-transport-mcp](https://github.com/malkreide/swiss-transport-mcp) — Swiss public transport
 - **Portfolio:** [Swiss Public Data MCP Portfolio](https://github.com/malkreide)
+
+<!-- mcp-name: io.github.malkreide/fedlex-mcp -->

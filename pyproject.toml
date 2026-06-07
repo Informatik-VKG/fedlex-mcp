@@ -53,7 +53,6 @@ otel = [
 fedlex-mcp = "fedlex_mcp.server:mcp.run"
 
 [project.urls]
-"mcp-name" = "io.github.malkreide/fedlex-mcp"
 Homepage   = "https://github.com/malkreide/fedlex-mcp"
 Repository = "https://github.com/malkreide/fedlex-mcp"
 Issues     = "https://github.com/malkreide/fedlex-mcp/issues"
